@@ -2,23 +2,39 @@ package sessao
 
 import (
 	"encoding/base64"
+	"fmt"
 	"image"
 	"image/color"
+	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/GitDavidJr/rustdesk-mcp/internal/rd/pb"
 )
 
+func resposta(id, saida string, codigo int) string {
+	b := base64.StdEncoding.EncodeToString([]byte(saida))
+	var sb strings.Builder
+	n := 0
+	fmt.Fprintf(&sb, "<<RDI:%s:00>>\r\n", id)
+	for i := 0; i < len(b); i += 160 {
+		fmt.Fprintf(&sb, "~%d~%s~\r\n", n, b[i:min(i+160, len(b))])
+		n++
+	}
+	fmt.Fprintf(&sb, "<<RDF:%s:%d:%d>>\r\n", id, codigo, n)
+	return sb.String()
+}
+
 // O console do Windows ecoa o comando, quebra a linha na largura e enfia sequências de tela no meio.
 func TestExtrairIgnoraEcoPromptEQuebra(t *testing.T) {
-	saida := "Versão 5 · ação\nlinha 2 <<RDF:outro:9>>"
-	b := base64.StdEncoding.EncodeToString([]byte(saida))
-	bruto := "\x1b[?25l\x1b[HPS C:\\Users\\Cliente> powershell -EncodedCommand AAAA\x1b[K\r\n" +
-		"<<RDI:abc123:0>>\r\n\x1b[5;1H" + b[:10] + "\r\n\x1b[K" + b[10:] + "\x1b[m\r\n<<RDF:abc123:3>>\r\nPS C:\\>"
+	saida := strings.Repeat("Versão 5 · ação\n", 60) + "fim <<RDF:outro:9:1>>"
+	bruto := resposta("abc123", saida, 3)
+	bruto = strings.Replace(bruto, "~1~", "\x1b[5;1H~1\x1b[K~", 1)
+	bruto = strings.Replace(bruto, "~2~", "~2~\r\n\x1b[m", 1) // quebrado pela largura
+	bruto = "\x1b[?25l\x1b[H> __rd 'abc123' 'AAAA' 100\x1b[K\r\n" + bruto + "> "
 	r, ok, err := extrair(bruto, "abc123")
 	if !ok || err != nil || r.Codigo != 3 || r.Saida != saida || r.Cortada {
-		t.Fatalf("%+v ok=%v err=%v", r, ok, err)
+		t.Fatalf("ok=%v err=%v codigo=%d igual=%v", ok, err, r.Codigo, r.Saida == saida)
 	}
 	if _, ok, _ := extrair(bruto[:len(bruto)-20], "abc123"); ok {
 		t.Fatal("deu por terminado sem a marca final")
@@ -28,25 +44,69 @@ func TestExtrairIgnoraEcoPromptEQuebra(t *testing.T) {
 	}
 }
 
-func TestExtrairSaidaCorrompidaAvisa(t *testing.T) {
-	_, ok, err := extrair("<<RDI:a:0>>\nQUJ\n<<RDF:a:0>>", "a")
-	if !ok || err == nil {
-		t.Fatal("base64 partido precisa virar erro, não saída errada")
+// Repintura repete linha (aceita); linha que sumiu vira erro, nunca saída errada.
+func TestExtrairRepinturaEFalta(t *testing.T) {
+	saida := strings.Repeat("x", 600)
+	bruto := resposta("a", saida, 0)
+	linhas := strings.Split(bruto, "\r\n")
+	repetida := strings.Join(append(append([]string{}, linhas[:3]...), linhas[1:]...), "\r\n")
+	if r, ok, err := extrair(repetida, "a"); !ok || err != nil || r.Saida != saida {
+		t.Fatal(ok, err, len(r.Saida))
+	}
+	falta := strings.Join(append(append([]string{}, linhas[:2]...), linhas[3:]...), "\r\n")
+	if _, ok, err := extrair(falta, "a"); !ok || err == nil {
+		t.Fatal("pedaço perdido precisa virar erro")
 	}
 }
 
-// A marca não pode aparecer no eco do comando: só a resposta a contém.
+func TestExtrairSaidaVaziaEArquivo(t *testing.T) {
+	if r, ok, err := extrair(resposta("a", "", 0), "a"); !ok || err != nil || r.Saida != "" {
+		t.Fatal(r, ok, err)
+	}
+	arq := strings.Replace(resposta("a", `C:\Temp\rdmcp-a.txt`, 0), ":00>>", ":11>>", 1)
+	if r, _, err := extrair(arq, "a"); err != nil || r.Arquivo != `C:\Temp\rdmcp-a.txt` || !r.Cortada || r.Saida != "" {
+		t.Fatal(r, err)
+	}
+}
+
+// A marca não pode aparecer no eco do comando nem na função auxiliar: só a resposta a contém.
 func TestComandoNaoContemAMarca(t *testing.T) {
-	for _, l := range []string{linhaPowerShell("id9", "Get-Date", `C:\Pasta d'água`, 100), linhaSh("id9", "date", "/tmp", 100)} {
-		if strings.Contains(l, "<<RDI:id9") || strings.Contains(l, "<<RDF:id9") {
+	for _, l := range []string{linhaPowerShell("id9", "Get-Date", `C:\Pasta d'água`, 100, false), linhaSh("id9", "date", "/tmp", 100), auxiliar} {
+		if strings.Contains(l, "<<RD") {
 			t.Fatal("a marca viaja em claro no comando: ", l)
 		}
+	}
+	if strings.ContainsAny(auxiliar, "\n\t") {
+		t.Fatal("a função auxiliar precisa caber numa linha, sem tabulação (o console completa nomes)")
 	}
 }
 
 func TestComandoLongoNaoVaiNaLinha(t *testing.T) {
-	if l := linhaPowerShell("x", strings.Repeat("Get-Date;", 600), "", 100); len(l) <= limiteLinha {
+	if l := linhaPowerShell("x", strings.Repeat("Get-Date;", 600), "", 100, true); len(l) <= limiteLinha {
 		t.Fatal("o limite de linha não seria respeitado")
+	}
+}
+
+// O caminho de Linux/macOS roda de verdade aqui.
+func TestLinhaShDeVerdade(t *testing.T) {
+	for _, c := range []struct {
+		cmd, quer string
+		cod       int
+	}{{"echo ação; echo dois", "ação\ndois", 0}, {"exit 4", "", 4}, {"ls /naoexiste", "", -1}, {"seq 1 400", "", 0}} {
+		b, _ := exec.Command("sh", "-c", linhaSh("abc", c.cmd, "/tmp", 30000)).CombinedOutput()
+		r, ok, err := extrair(string(b), "abc")
+		if !ok || err != nil {
+			t.Fatalf("%s: ok=%v err=%v %q", c.cmd, ok, err, b)
+		}
+		if c.cod >= 0 && r.Codigo != c.cod || c.cod < 0 && r.Codigo == 0 {
+			t.Fatalf("%s: código %d", c.cmd, r.Codigo)
+		}
+		if c.quer != "" && r.Saida != c.quer {
+			t.Fatalf("%s: %q", c.cmd, r.Saida)
+		}
+		if c.cmd == "seq 1 400" && !strings.HasSuffix(r.Saida, "\n399\n400") {
+			t.Fatalf("saída longa: %q", r.Saida[max(0, len(r.Saida)-20):])
+		}
 	}
 }
 

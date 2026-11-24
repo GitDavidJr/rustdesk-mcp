@@ -161,7 +161,7 @@ func cli(ctx context.Context, g *sessao.Gerente, args []string) error {
 	defer func() { fmt.Fprintf(os.Stderr, "levou %s\n", time.Since(t0).Round(time.Millisecond)) }()
 	switch a[1] {
 	case "executar":
-		r, err := m.Executar(ctx, strings.Join(a[2:], " "), "", false, 60000, 120*time.Second)
+		r, err := m.Executar(ctx, strings.Join(a[2:], " "), "", false, false, 60000, 120*time.Second)
 		fmt.Println(r.Saida)
 		fmt.Fprintf(os.Stderr, "código %d\n", r.Codigo)
 		return err

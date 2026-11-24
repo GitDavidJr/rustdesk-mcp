@@ -2,6 +2,9 @@ package sessao
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -9,9 +12,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf16"
 
 	"github.com/GitDavidJr/rustdesk-mcp/internal/maquinas"
 	"github.com/GitDavidJr/rustdesk-mcp/internal/rd/files"
@@ -59,6 +65,7 @@ type Ativa struct {
 	tela      *Tela
 	arq       *files.Client
 	tuneis    map[string]*forward.Mapping
+	admins    map[string]string // pedidos de administrador à espera: id -> base dos arquivos
 	Info      *pb.PeerInfo
 	ultimoUso time.Time
 }
@@ -92,7 +99,7 @@ func (g *Gerente) Conectar(ctx context.Context, p Pedido) (*Ativa, error) {
 			return nil, errors.New("informe o cliente e quem autorizou o acesso")
 		}
 	}
-	a := &Ativa{ID: id, Apelido: m.Apelido, Cliente: m.Cliente, Autorizado: m.Autorizado, g: g, senha: p.Senha, usuario: p.UsuarioWindows, senhaWin: p.SenhaWindow, sessao: peer.NovaSessao(), tuneis: map[string]*forward.Mapping{}, ultimoUso: time.Now()}
+	a := &Ativa{ID: id, Apelido: m.Apelido, Cliente: m.Cliente, Autorizado: m.Autorizado, g: g, senha: p.Senha, usuario: p.UsuarioWindows, senhaWin: p.SenhaWindow, sessao: peer.NovaSessao(), tuneis: map[string]*forward.Mapping{}, admins: map[string]string{}, ultimoUso: time.Now()}
 	if p.Senha == "" {
 		a.hash = m.Hash
 	}
@@ -225,8 +232,11 @@ func (a *Ativa) Conversa(ctx context.Context) (*Terminal, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.conversa, err = AbrirTerminal(ctx, s)
-	return a.conversa, err
+	if a.conversa, err = AbrirTerminal(ctx, s); err != nil {
+		return nil, err
+	}
+	a.conversa.Ver(ctx, 25*time.Second) // até o prompt: o que chega antes se perde
+	return a.conversa, nil
 }
 
 // TerminalAdmin roda como SYSTEM; exige usuário e senha de um administrador do Windows informados no conectar.
@@ -309,8 +319,9 @@ func (a *Ativa) Baixar(ctx context.Context, origem, local string) error {
 	return c.Download(ctx, origem, local, files.TransferOptions{})
 }
 
-// Executar roda o comando no terminal do usuário (ou de administrador). Comando longo vai como arquivo temporário.
-func (a *Ativa) Executar(ctx context.Context, comando, pasta string, admin bool, maxSaida int, prazo time.Duration) (Resultado, error) {
+// Executar roda o comando no terminal do usuário (ou de administrador). Comando longo vai como arquivo temporário,
+// e saída grande volta como arquivo; os dois são apagados da máquina em seguida.
+func (a *Ativa) Executar(ctx context.Context, comando, pasta string, admin, utf8 bool, maxSaida int, prazo time.Duration) (Resultado, error) {
 	abrir := a.Terminal
 	if admin {
 		abrir = a.TerminalAdmin
@@ -319,25 +330,141 @@ func (a *Ativa) Executar(ctx context.Context, comando, pasta string, admin bool,
 	if err != nil {
 		return Resultado{}, err
 	}
-	r, err := t.Executar(ctx, comando, pasta, maxSaida, prazo)
-	if !errors.Is(err, ErrComandoLongo) {
+	r, err := t.Executar(ctx, comando, pasta, maxSaida, utf8, prazo)
+	if errors.Is(err, ErrComandoLongo) {
+		r, err = a.executarArquivo(ctx, t, comando, pasta, maxSaida, utf8, prazo)
+	}
+	if err != nil || r.Arquivo == "" {
 		return r, err
 	}
-	tmp, err := t.Executar(ctx, se(t.windows, "[IO.Path]::GetTempPath()", "echo ${TMPDIR:-/tmp}/"), "", 1000, 30*time.Second)
+	defer t.Executar(context.WithoutCancel(ctx), "Remove-Item -LiteralPath '"+strings.ReplaceAll(r.Arquivo, "'", "''")+"' -Force", "", 500, false, 20*time.Second)
+	d, err := os.MkdirTemp("", "rdmcp")
+	if err != nil {
+		return r, err
+	}
+	defer os.RemoveAll(d)
+	local := filepath.Join(d, "saida.txt")
+	if err := a.Baixar(ctx, r.Arquivo, local); err != nil {
+		return r, fmt.Errorf("a saída é grande e a máquina não deixou baixar o arquivo dela (%w); filtre no comando", err)
+	}
+	b, err := os.ReadFile(local)
+	r.Saida, r.Arquivo = Aparar(string(b)), ""
+	return r, err
+}
+
+func (a *Ativa) executarArquivo(ctx context.Context, t *Terminal, comando, pasta string, maxSaida int, utf8 bool, prazo time.Duration) (Resultado, error) {
+	tmp, err := t.Executar(ctx, se(t.windows, "[IO.Path]::GetTempPath()", "echo ${TMPDIR:-/tmp}/"), "", 1000, false, 30*time.Second)
 	if err != nil {
 		return Resultado{}, err
 	}
-	id := marca()
-	destino := strings.TrimSpace(tmp.Saida) + "rdmcp-" + id + se(t.windows, ".ps1", ".sh")
-	corpo := []byte(se(t.windows, string(rune(0xFEFF)), "") + comando)
-	if err := a.Enviar(ctx, corpo, destino); err != nil {
+	destino := strings.TrimSpace(tmp.Saida) + "rdmcp-" + marca() + se(t.windows, ".ps1", ".sh")
+	if err := a.Enviar(ctx, []byte(se(t.windows, string(rune(0xFEFF)), "")+comando), destino); err != nil {
 		return Resultado{}, fmt.Errorf("comando longo: não consegui enviar o arquivo: %w", err)
 	}
-	q := "'" + strings.ReplaceAll(destino, "'", "''") + "'"
 	if t.windows {
-		return t.Executar(ctx, "try { & "+q+" } finally { Remove-Item -LiteralPath "+q+" -Force -ErrorAction SilentlyContinue }", pasta, maxSaida, prazo)
+		q := "'" + strings.ReplaceAll(destino, "'", "''") + "'"
+		return t.Executar(ctx, "try { & "+q+" } finally { Remove-Item -LiteralPath "+q+" -Force -ErrorAction SilentlyContinue }", pasta, maxSaida, utf8, prazo)
 	}
-	return t.Executar(ctx, "sh '"+destino+"'; c=$?; rm -f '"+destino+"'; (exit $c)", pasta, maxSaida, prazo)
+	return t.Executar(ctx, "sh '"+destino+"'; c=$?; rm -f '"+destino+"'; (exit $c)", pasta, maxSaida, utf8, prazo)
+}
+
+// PedirAdmin envia o comando como script e pede a elevação por um processo solto, que sobrevive ao terminal. Quem
+// confirma é quem está na tela (aviso do Windows). Devolve o id para AdminResultado. O processo elevado confere o
+// resumo do arquivo antes de rodar: o que foi pedido é o que roda.
+func (a *Ativa) PedirAdmin(ctx context.Context, comando string, utf8 bool) (string, error) {
+	t, err := a.Terminal(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !t.windows {
+		return "", errors.New("só no Windows; no Linux/macOS use sudo no terminal interativo")
+	}
+	tmp, err := t.Executar(ctx, "[IO.Path]::GetTempPath()", "", 1000, false, 30*time.Second)
+	if err != nil {
+		return "", err
+	}
+	id := marca()
+	base := strings.TrimSpace(tmp.Saida) + "rdmcp-" + id
+	corpo := []byte(comando)
+	if err := a.Enviar(ctx, corpo, base+".admin"); err != nil {
+		return "", fmt.Errorf("não consegui enviar o comando: %w", err)
+	}
+	soma := sha256.Sum256(corpo)
+	elevado := "$ProgressPreference='SilentlyContinue';$b=[IO.File]::ReadAllBytes('" + aspas(base) + ".admin');" +
+		"$h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b)).Replace('-','');" +
+		"if($h -ne '" + strings.ToUpper(hex.EncodeToString(soma[:])) + "'){exit 9};" +
+		"try{[Console]::OutputEncoding=" + se(utf8, "[Text.Encoding]::UTF8", "[Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)") + "}catch{};" +
+		"$global:LASTEXITCODE=0;$Error.Clear();$o='';try{$s=[ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($b));$o=(& $s 2>&1|Out-String -Width 4096)}catch{$o=[string]$o+($_|Out-String)};" +
+		"$k=$global:LASTEXITCODE;if($k -eq 0 -and @($Error|Where-Object{$_.FullyQualifiedErrorId -notlike 'NativeCommandError*'}).Count){$k=1};" +
+		"[IO.File]::WriteAllText('" + aspas(base) + ".parte',[string]$k+[char]10+$o,(New-Object Text.UTF8Encoding $false));Move-Item '" + aspas(base) + ".parte' '" + aspas(base) + ".saida' -Force"
+	pede := "Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + codificado(elevado) + "'"
+	r, err := t.Executar(ctx, "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile -EncodedCommand "+codificado(pede)+"'", "", 2000, false, 30*time.Second)
+	if err != nil && !errors.Is(err, ErrComandoLongo) {
+		return "", err
+	}
+	if errors.Is(err, ErrComandoLongo) {
+		r, err = a.executarArquivo(ctx, t, "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile -EncodedCommand "+codificado(pede)+"'", "", 2000, false, 30*time.Second)
+		if err != nil {
+			return "", err
+		}
+	}
+	if r.Codigo != 0 {
+		return "", errors.New(r.Saida)
+	}
+	a.mu.Lock()
+	a.admins[id] = base
+	a.mu.Unlock()
+	return id, nil
+}
+
+// AdminResultado busca a saída do comando elevado e apaga os arquivos. pronto=false: ainda não confirmaram ou não acabou.
+func (a *Ativa) AdminResultado(ctx context.Context, id string, max int) (saida string, codigo int, pronto bool, err error) {
+	a.mu.Lock()
+	base, ok := a.admins[id]
+	a.mu.Unlock()
+	if !ok {
+		return "", 0, false, errors.New("pedido desconhecido")
+	}
+	q := "'" + aspas(base)
+	r, err := a.Executar(ctx, "if(Test-Path -LiteralPath "+q+".saida'){Get-Content -Raw -Encoding UTF8 -LiteralPath "+q+".saida'}else{throw 'ainda nao'}", "", false, false, max, 60*time.Second)
+	if err != nil {
+		return "", 0, false, err
+	}
+	if r.Codigo != 0 {
+		return "", 0, false, nil
+	}
+	cod, resto, _ := strings.Cut(r.Saida, "\n")
+	codigo, _ = strconv.Atoi(strings.TrimSpace(cod))
+	a.Executar(ctx, "Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath "+q+".saida',"+q+".admin',"+q+".parte'", "", false, false, 500, 30*time.Second)
+	a.mu.Lock()
+	delete(a.admins, id)
+	a.mu.Unlock()
+	return Aparar(resto), codigo, true, nil
+}
+
+// DesistirAdmin apaga o pedido que não foi confirmado.
+func (a *Ativa) DesistirAdmin(ctx context.Context, id string) error {
+	a.mu.Lock()
+	base, ok := a.admins[id]
+	delete(a.admins, id)
+	a.mu.Unlock()
+	if !ok {
+		return errors.New("pedido desconhecido")
+	}
+	q := "'" + aspas(base)
+	_, err := a.Executar(ctx, "Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath "+q+".saida',"+q+".admin',"+q+".parte'", "", false, false, 500, 30*time.Second)
+	return err
+}
+
+func aspas(s string) string { return strings.ReplaceAll(s, "'", "''") }
+
+func codificado(script string) string {
+	u := utf16.Encode([]rune(script))
+	b := make([]byte, 0, len(u)*2)
+	for _, c := range u {
+		b = append(b, byte(c), byte(c>>8))
+	}
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 func se(c bool, a, b string) string {
@@ -360,12 +487,31 @@ func (a *Ativa) Discar(ctx context.Context, host string, porta int32) (net.Conn,
 	}
 	a.mu.Unlock()
 	nosso, deles := net.Pipe()
+	c := &discada{Conn: nosso}
 	go func() {
 		if err := m.Serve(context.WithoutCancel(ctx), deles); err != nil {
-			deles.Close()
+			e := fmt.Errorf("a máquina não abriu %s: %w", alvo, err)
+			c.motivo.Store(&e)
 		}
+		deles.Close()
 	}()
-	return nosso, nil
+	return c, nil
+}
+
+// discada troca o "fim da conexão" seco pelo motivo real (porta fechada, nome que não resolve, túnel sem permissão).
+type discada struct {
+	net.Conn
+	motivo atomic.Pointer[error]
+}
+
+func (d *discada) Read(b []byte) (int, error) {
+	n, err := d.Conn.Read(b)
+	if err != nil {
+		if e := d.motivo.Load(); e != nil {
+			return n, *e
+		}
+	}
+	return n, err
 }
 
 // HTTP faz um pedido a partir da rede do cliente: sistema web interno, API local.
@@ -392,8 +538,18 @@ func (a *Ativa) HTTP(ctx context.Context, req *http.Request, max int64) (*http.R
 	return resp, b, err
 }
 
-// Salvar guarda o acesso fixo no cadastro.
-func (a *Ativa) Salvar(apelido, obs string) error {
+// Salvar guarda o acesso fixo no cadastro. Antes entra de novo como outra sessão: a senha de uso único, que já
+// morreu na primeira entrada, é recusada aqui em vez de virar um cadastro que não funciona.
+func (a *Ativa) Salvar(ctx context.Context, apelido, obs string) error {
+	a.cred.Lock()
+	hash := a.hash
+	a.cred.Unlock()
+	prova := &Ativa{ID: a.ID, g: a.g, hash: hash, sessao: peer.NovaSessao()}
+	s, err := prova.conectar(ctx, pb.ConnType_FILE_TRANSFER, files.LoginFields("", false), files.LoginErrorCode)
+	if err != nil {
+		return fmt.Errorf("só dá para salvar com a senha FIXA, e uma entrada nova com esta senha falhou: %w", err)
+	}
+	s.Close("")
 	a.cred.Lock()
 	m := maquinas.Maquina{Apelido: apelido, ID: a.ID, Cliente: a.Cliente, Autorizado: a.Autorizado, Em: time.Now(), Obs: obs, Hash: a.hash}
 	a.cred.Unlock()

@@ -105,9 +105,21 @@ type inExecutar struct {
 	Maquina  string `json:"maquina"`
 	Comando  string `json:"comando" jsonschema:"PowerShell no Windows, sh no Linux/macOS; pode ter várias linhas"`
 	Pasta    string `json:"pasta,omitempty" jsonschema:"pasta onde rodar"`
-	Admin    bool   `json:"admin,omitempty" jsonschema:"roda como SYSTEM; exige usuario_windows no conectar"`
+	Admin    bool   `json:"admin,omitempty" jsonschema:"roda como SYSTEM pelo terminal de administrador; exige usuario_windows no conectar"`
+	UTF8     bool   `json:"utf8,omitempty" jsonschema:"true quando o programa chamado escreve em UTF-8 (node, git, python) e o acento sair trocado"`
 	PrazoS   int    `json:"prazo_s,omitempty" jsonschema:"segundos até desistir de esperar (padrão 60, máximo 600)"`
 	MaxSaida int    `json:"max_saida,omitempty" jsonschema:"caracteres de saída (padrão 30000)"`
+}
+type inAdmin struct {
+	Maquina string `json:"maquina"`
+	Comando string `json:"comando" jsonschema:"PowerShell"`
+	UTF8    bool   `json:"utf8,omitempty"`
+}
+type inAdminRes struct {
+	Maquina  string `json:"maquina"`
+	Pedido   string `json:"pedido" jsonschema:"id devolvido pelo executar_admin"`
+	EsperaS  int    `json:"espera_s,omitempty" jsonschema:"segundos esperando (padrão 10, máximo 300)"`
+	Desistir bool   `json:"desistir,omitempty"`
 }
 type inEscrever struct {
 	Maquina string `json:"maquina"`
@@ -241,7 +253,7 @@ func (sv *Servidor) Novo() *mcp.Server {
 			if err != nil {
 				return nil, err
 			}
-			if err := a.Salvar(in.Apelido, in.Obs); err != nil {
+			if err := a.Salvar(ctx, in.Apelido, in.Obs); err != nil {
 				return nil, err
 			}
 			return texto("salva como " + in.Apelido), nil
@@ -267,11 +279,11 @@ func (sv *Servidor) Novo() *mcp.Server {
 			if err != nil {
 				return nil, err
 			}
-			r, err := a.Executar(ctx, raioX, "", false, 60000, 150*time.Second)
+			r, err := a.Executar(ctx, raioX, "", false, false, 60000, 150*time.Second)
 			return texto(r.Saida), err
 		})
 
-	ferramenta(sv, s, "executar", "Roda um comando no terminal da máquina e devolve a saída e o código. Roda como o usuário logado; sem administrador, a não ser com admin.", false,
+	ferramenta(sv, s, "executar", "Roda um comando no terminal da máquina e devolve a saída e o código. Roda como o usuário logado, sem administrador (para isso, executar_admin).", false,
 		func(in inExecutar) (string, map[string]any) {
 			return in.Maquina, map[string]any{"comando": in.Comando, "pasta": in.Pasta, "admin": in.Admin}
 		},
@@ -280,7 +292,7 @@ func (sv *Servidor) Novo() *mcp.Server {
 			if err != nil {
 				return nil, err
 			}
-			r, err := a.Executar(ctx, in.Comando, in.Pasta, in.Admin, limite(in.MaxSaida, 30000, 200000), time.Duration(limite(in.PrazoS, 60, 600))*time.Second)
+			r, err := a.Executar(ctx, in.Comando, in.Pasta, in.Admin, in.UTF8, limite(in.MaxSaida, 30000, 200000), time.Duration(limite(in.PrazoS, 60, 600))*time.Second)
 			if err != nil {
 				return texto(r.Saida), err
 			}
@@ -294,7 +306,68 @@ func (sv *Servidor) Novo() *mcp.Server {
 			return texto(fmt.Sprintf("%s\n[código %d]", out, r.Codigo)), nil
 		})
 
-	ferramenta(sv, s, "terminal_escrever", "Digita no terminal interativo e devolve o que saiu: para programa que conversa (sqlcmd, isql, sqlplus) ou para interromper (\\u0003).", false,
+	ferramenta(sv, s, "executar_admin", "Pede para rodar um comando como administrador (Windows). Abre o aviso do Windows na tela e devolve o print: só confirme (clicar em Sim) com o ok do dono; se pedir senha, quem digita é o dono. Depois use admin_resultado.", false,
+		func(in inAdmin) (string, map[string]any) { return in.Maquina, map[string]any{"comando": in.Comando} },
+		func(ctx context.Context, in inAdmin) (*mcp.CallToolResult, error) {
+			a, err := sv.G.Pegar(in.Maquina)
+			if err != nil {
+				return nil, err
+			}
+			id, err := a.PedirAdmin(ctx, in.Comando, in.UTF8)
+			if err != nil {
+				return nil, err
+			}
+			nota := &mcp.TextContent{Text: "pedido " + id + " enviado. Se o aviso não estiver no print, chame tela de novo. Depois de confirmar: admin_resultado"}
+			t, err := a.Tela(ctx)
+			if err != nil {
+				return &mcp.CallToolResult{Content: []mcp.Content{nota, &mcp.TextContent{Text: "sem tela: " + err.Error()}}}, nil
+			}
+			select {
+			case <-time.After(3 * time.Second):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			r, err := sv.print(ctx, t, 0, nil)
+			if err != nil {
+				return &mcp.CallToolResult{Content: []mcp.Content{nota, &mcp.TextContent{Text: "sem print: " + err.Error()}}}, nil
+			}
+			r.Content = append(r.Content, nota)
+			return r, nil
+		})
+
+	ferramenta(sv, s, "admin_resultado", "Busca a saída de um executar_admin confirmado. Com desistir, apaga o pedido.", true,
+		func(in inAdminRes) (string, map[string]any) {
+			return in.Maquina, map[string]any{"pedido": in.Pedido, "desistir": in.Desistir}
+		},
+		func(ctx context.Context, in inAdminRes) (*mcp.CallToolResult, error) {
+			a, err := sv.G.Pegar(in.Maquina)
+			if err != nil {
+				return nil, err
+			}
+			if in.Desistir {
+				return texto("apagado"), a.DesistirAdmin(ctx, in.Pedido)
+			}
+			fim := time.Now().Add(time.Duration(limite(in.EsperaS, 10, 300)) * time.Second)
+			for {
+				out, cod, pronto, err := a.AdminResultado(ctx, in.Pedido, 30000)
+				if err != nil {
+					return nil, err
+				}
+				if pronto {
+					return texto(fmt.Sprintf("%s\n[código %d, como administrador]", out, cod)), nil
+				}
+				if time.Now().After(fim) {
+					return texto("ainda não: o aviso não foi confirmado ou o comando não terminou"), nil
+				}
+				select {
+				case <-time.After(1500 * time.Millisecond):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+		})
+
+	ferramenta(sv, s, "terminal_escrever", "Digita no terminal interativo e devolve a tela dele: para programa que conversa (sqlcmd, isql, sqlplus) ou para interromper (\\u0003).", false,
 		func(in inEscrever) (string, map[string]any) { return in.Maquina, map[string]any{"texto": in.Texto} },
 		func(ctx context.Context, in inEscrever) (*mcp.CallToolResult, error) {
 			a, err := sv.G.Pegar(in.Maquina)
@@ -311,7 +384,7 @@ func (sv *Servidor) Novo() *mcp.Server {
 			return sv.lerTerminal(ctx, t, limite(in.EsperaS, 3, 60))
 		})
 
-	ferramenta(sv, s, "terminal_ler", "Lê o que saiu no terminal interativo desde a última leitura.", true,
+	ferramenta(sv, s, "terminal_ler", "Mostra a tela do terminal interativo (50 linhas). Para saída longa, use executar.", true,
 		func(in inLer) (string, map[string]any) { return in.Maquina, nil },
 		func(ctx context.Context, in inLer) (*mcp.CallToolResult, error) {
 			a, err := sv.G.Pegar(in.Maquina)
@@ -514,27 +587,11 @@ func (sv *Servidor) Novo() *mcp.Server {
 }
 
 func (sv *Servidor) lerTerminal(ctx context.Context, t *sessao.Terminal, espera int) (*mcp.CallToolResult, error) {
-	var b strings.Builder
-	fim := time.Now().Add(time.Duration(espera) * time.Second)
-	for time.Now().Before(fim) {
-		s, err := t.Ler(ctx, time.Until(fim))
-		b.WriteString(s)
-		if err != nil {
-			return texto(b.String()), err
-		}
-		if s == "" {
-			break
-		}
-		time.Sleep(250 * time.Millisecond)
+	v, err := t.Ver(ctx, time.Duration(espera)*time.Second)
+	if v == "" {
+		v = "(tela vazia)"
 	}
-	if b.Len() == 0 {
-		return texto("(nada novo)"), nil
-	}
-	out := b.String()
-	if len(out) > 30000 {
-		out = "[...]\n" + strings.ToValidUTF8(out[len(out)-30000:], "")
-	}
-	return texto(out), nil
+	return texto(v), err
 }
 
 func (sv *Servidor) tela(ctx context.Context, maquina string) (*sessao.Tela, error) {

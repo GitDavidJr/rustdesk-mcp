@@ -48,7 +48,7 @@ func TestFerramentasERegras(t *testing.T) {
 	for _, f := range l.Tools {
 		nomes[f.Name] = f
 	}
-	for _, n := range []string{"maquinas", "conectar", "desconectar", "maquina_salvar", "maquina_esquecer", "raio_x", "executar", "terminal_escrever", "terminal_ler", "tela", "clicar", "arrastar", "rolar", "digitar", "teclas", "arquivos", "arquivo_baixar", "arquivo_enviar", "http"} {
+	for _, n := range []string{"maquinas", "conectar", "desconectar", "maquina_salvar", "maquina_esquecer", "raio_x", "executar", "executar_admin", "admin_resultado", "terminal_escrever", "terminal_ler", "tela", "clicar", "arrastar", "rolar", "digitar", "teclas", "arquivos", "arquivo_baixar", "arquivo_enviar", "http"} {
 		if nomes[n] == nil {
 			t.Fatal("falta", n)
 		}

@@ -12,8 +12,10 @@ máquina remota fica só o RustDesk comum, que decide quem entra pela senha dela
 Projeto não oficial, sem afiliação com o RustDesk ou a Purslane Ltd. Use só em
 máquinas cujo dono autorizou o acesso.
 
-> **Estado:** versão inicial. O protocolo tem testes de ponta a ponta contra um
-> servidor e uma máquina simulados; a validação em Windows real está em andamento.
+> **Estado:** validado em Windows 11 com RustDesk 1.5.3 e servidor próprio: terminal,
+> print, mouse e teclado, aviso de administrador (UAC), arquivos, HTTP pela rede da
+> máquina, senha de uso único e senha fixa. Linux e macOS como máquina remota ainda
+> não foram testados de verdade.
 
 ## Para que serve
 
@@ -23,12 +25,13 @@ máquinas cujo dono autorizou o acesso.
 - **Sistema que só tem interface:** ver a tela, clicar, digitar, usar atalhos.
 - **Sistema web interno:** chamar a API ou a página pela rede da máquina (`http`).
 
-## Ferramentas (19)
+## Ferramentas (21)
 
 | Categoria | Ferramentas |
 |---|---|
 | **Conexão** | `conectar`, `desconectar`, `maquinas`, `maquina_salvar`, `maquina_esquecer` |
-| **Terminal** | `executar` (saída limpa e código de saída), `terminal_escrever` e `terminal_ler` (sqlcmd, isql, sqlplus...) |
+| **Terminal** | `executar` (saída limpa e código de saída, ~0,3 s por comando), `terminal_escrever` e `terminal_ler` (sqlcmd, isql, sqlplus...) |
+| **Administrador** | `executar_admin` (abre o aviso do Windows e mostra o print) e `admin_resultado` |
 | **Mapa** | `raio_x`: sistema, serviços de banco e web, portas, conexões, janelas, atalhos, programas, ODBC, arquivos de banco e configuração, tarefas e rede. Só leitura, Windows |
 | **Tela** | `tela` (inteira ou recorte em resolução cheia), `clicar`, `arrastar`, `rolar`, `digitar`, `teclas` |
 | **Arquivos** | `arquivos`, `arquivo_baixar`, `arquivo_enviar` |
@@ -95,8 +98,10 @@ claude mcp add --transport http rustdesk https://mcp.exemplo.com/ \
 ## Como é o acesso no Windows
 
 - O terminal roda como o **usuário logado, sem administrador**, e exige alguém logado.
-- Para administrador: informe um administrador do Windows no `conectar` (o terminal
-  roda como SYSTEM), ou abra o PowerShell como administrador pela tela e confirme o UAC.
+- Para administrador: `executar_admin` pede a elevação e o aviso do Windows aparece no
+  print para confirmar, com o ok do dono. Ou informe um administrador do Windows no
+  `conectar`, e o terminal roda como SYSTEM.
+- Sem ninguém logado (tela de login), o terminal não abre; a tela abre.
 - A senha de uso único vale uma entrada. O servidor usa uma sessão só para terminal,
   tela e arquivos, então uma senha basta enquanto houver uma conexão viva.
 
