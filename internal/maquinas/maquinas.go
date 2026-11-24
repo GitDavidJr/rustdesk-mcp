@@ -121,6 +121,15 @@ func (r *Registro) gravar() error {
 	return os.Rename(tmp, r.caminho)
 }
 
+var semAcento = strings.NewReplacer("á", "a", "à", "a", "â", "a", "ã", "a", "ä", "a", "é", "e", "è", "e", "ê", "e", "ë", "e", "í", "i", "ì", "i", "î", "i", "ï", "i",
+	"ó", "o", "ò", "o", "ô", "o", "õ", "o", "ö", "o", "ú", "u", "ù", "u", "û", "u", "ü", "u", "ç", "c", "ñ", "n")
+
+// MesmoCliente compara nomes sem caixa, acento ou espaço sobrando. Nome vazio nunca casa.
+func MesmoCliente(a, b string) bool {
+	n := func(s string) string { return semAcento.Replace(strings.ToLower(strings.Join(strings.Fields(s), " "))) }
+	return n(a) != "" && n(a) == n(b)
+}
+
 // SoNumeros tira espaços do ID como o RustDesk mostra ("123 456 789").
 func SoNumeros(id string) string {
 	return strings.Map(func(c rune) rune {

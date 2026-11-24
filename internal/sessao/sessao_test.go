@@ -1,7 +1,9 @@
 package sessao
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -9,7 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GitDavidJr/rustdesk-mcp/internal/maquinas"
 	"github.com/GitDavidJr/rustdesk-mcp/internal/rd/pb"
+	"github.com/GitDavidJr/rustdesk-mcp/internal/rd/rendezvous"
 )
 
 func resposta(id, saida string, codigo int) string {
@@ -168,5 +172,36 @@ func TestTeclas(t *testing.T) {
 		if _, err := evento(ruim); err == nil {
 			t.Fatal("aceitou", ruim)
 		}
+	}
+}
+
+// Quem chega depois usa a conexão aberta (não derruba quem está trabalhando), e nunca a de outro cliente.
+func TestConectarReusaEConfereOCliente(t *testing.T) {
+	reg, _ := maquinas.Abrir(t.TempDir() + "/m.json")
+	if err := reg.Salvar(maquinas.Maquina{Apelido: "loja-servidor", ID: "111222333", Cliente: "Loja Ação", Autorizado: "dono", Hash: []byte{1}}); err != nil {
+		t.Fatal(err)
+	}
+	g := &Gerente{Cadastro: reg, Servidor: rendezvous.Server{IDServer: "127.0.0.1:1", Key: "x"}}
+	viva := &Ativa{ID: "444555666", Cliente: "Loja Ação", g: g, term: &Terminal{sinal: make(chan struct{})}}
+	g.ativas = map[string]*Ativa{"444555666": viva}
+	ctx := context.Background()
+	for _, p := range []Pedido{{Maquina: "444 555 666", Cliente: "loja acao", ExigirCliente: true}, {Maquina: "444555666", Senha: "outra"}} {
+		if a, err := g.Conectar(ctx, p); err != nil || a != viva {
+			t.Fatalf("não reusou: %+v %v", p, err)
+		}
+	}
+	for _, p := range []Pedido{
+		{Maquina: "444555666", Senha: "x", Cliente: "Outra", Autorizado: "y", ExigirCliente: true},
+		{Maquina: "444555666", Senha: "x", Cliente: "", Autorizado: "y", ExigirCliente: true},
+		{Maquina: "loja-servidor", Cliente: "Outra", ExigirCliente: true},
+		{Maquina: "111222333", Senha: "x", Cliente: "Outra", Autorizado: "y", ExigirCliente: true},
+	} {
+		if _, err := g.Conectar(ctx, p); !errors.Is(err, ErrOutroCliente) {
+			t.Fatalf("deixou passar %+v: %v", p, err)
+		}
+	}
+	viva.term.fim = errors.New("caiu")
+	if _, err := g.Conectar(ctx, Pedido{Maquina: "444555666", Cliente: "Loja Ação", ExigirCliente: true}); err == nil || !strings.Contains(err.Error(), "senha") {
+		t.Fatal("sem conexão viva e sem cadastro precisa pedir a senha:", err)
 	}
 }

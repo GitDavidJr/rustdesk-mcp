@@ -45,7 +45,15 @@ type Pedido struct {
 	Senha                       string // vazia: usa o acesso fixo cadastrado
 	Cliente, Autorizado         string
 	UsuarioWindows, SenhaWindow string // administrador do Windows: libera o terminal de administrador
+	// ExigirCliente recusa máquina cadastrada ou já conectada em nome de outro cliente. É para quem chama em nome
+	// de um atendimento e não pode alcançar a máquina de outro.
+	ExigirCliente bool
+	// Reconectar derruba a conexão que existe e abre outra; sem isso, quem chega usa a que está aberta.
+	Reconectar bool
 }
+
+// ErrOutroCliente: a máquina pertence a outro cliente.
+var ErrOutroCliente = errors.New("essa máquina é de outro cliente")
 
 // Ativa é uma máquina conectada; terminal, tela e arquivos abrem quando usados.
 type Ativa struct {
@@ -88,10 +96,23 @@ func (g *Gerente) Conectar(ctx context.Context, p Pedido) (*Ativa, error) {
 	m, cadastrada := g.Cadastro.Achar(p.Maquina)
 	id := m.ID
 	if !cadastrada {
-		id = maquinas.SoNumeros(p.Maquina)
-		if id == "" {
+		if id = maquinas.SoNumeros(p.Maquina); id == "" {
 			return nil, fmt.Errorf("máquina %q não cadastrada e não é um ID", p.Maquina)
 		}
+	}
+	if p.ExigirCliente && cadastrada && !maquinas.MesmoCliente(m.Cliente, p.Cliente) {
+		return nil, ErrOutroCliente
+	}
+	if aberta := g.pegar(id); aberta != nil {
+		if p.ExigirCliente && !maquinas.MesmoCliente(aberta.Cliente, p.Cliente) {
+			return nil, ErrOutroCliente
+		}
+		if !p.Reconectar && aberta.Viva() {
+			aberta.usar()
+			return aberta, nil
+		}
+	}
+	if !cadastrada {
 		if p.Senha == "" {
 			return nil, errors.New("máquina sem acesso fixo: informe a senha que o cliente mandou")
 		}
@@ -143,10 +164,26 @@ func (g *Gerente) Pegar(nome string) (*Ativa, error) {
 	if a == nil {
 		return nil, fmt.Errorf("%s não está conectada: use conectar", nome)
 	}
+	a.usar()
+	return a, nil
+}
+
+func (a *Ativa) usar() {
 	a.mu.Lock()
 	a.ultimoUso = time.Now()
 	a.mu.Unlock()
-	return a, nil
+}
+
+// Viva diz se alguma conexão com a máquina está de pé.
+func (a *Ativa) Viva() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, t := range []*Terminal{a.term, a.conversa, a.admin} {
+		if t != nil && t.Vivo() {
+			return true
+		}
+	}
+	return a.tela != nil && a.tela.Vivo()
 }
 
 // Conectadas agora.

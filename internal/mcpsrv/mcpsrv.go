@@ -17,6 +17,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/GitDavidJr/rustdesk-mcp/internal/auditoria"
+	"github.com/GitDavidJr/rustdesk-mcp/internal/maquinas"
 	"github.com/GitDavidJr/rustdesk-mcp/internal/sessao"
 )
 
@@ -84,7 +85,9 @@ func (l leitura) anota() *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{ReadOnlyHint: bool(l), DestructiveHint: &destrutiva}
 }
 
-type inNada struct{}
+type inMaquinas struct {
+	Cliente string `json:"cliente,omitempty" jsonschema:"só as máquinas deste cliente"`
+}
 type inMaquina struct {
 	Maquina string `json:"maquina" jsonschema:"apelido cadastrado ou ID do RustDesk"`
 }
@@ -95,6 +98,8 @@ type inConectar struct {
 	AutorizadoPor  string `json:"autorizado_por,omitempty" jsonschema:"quem do cliente liberou e quando; obrigatório sem cadastro"`
 	UsuarioWindows string `json:"usuario_windows,omitempty" jsonschema:"administrador do Windows, para o terminal de administrador"`
 	SenhaWindows   string `json:"senha_windows,omitempty" jsonschema:"senha desse administrador"`
+	ExigirCliente  bool   `json:"exigir_cliente,omitempty" jsonschema:"recusa máquina cadastrada ou conectada em nome de outro cliente"`
+	Reconectar     bool   `json:"reconectar,omitempty" jsonschema:"derruba a conexão que existe e abre outra"`
 }
 type inSalvar struct {
 	Maquina string `json:"maquina" jsonschema:"ID já conectado com a senha FIXA"`
@@ -205,15 +210,21 @@ func (sv *Servidor) Novo() *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "rustdesk-mcp", Version: sv.Versao}, &mcp.ServerOptions{Instructions: strings.TrimSpace(Instrucoes + "\n\n" + sv.Regras)})
 
 	ferramenta(sv, s, "maquinas", "Lista as máquinas com acesso fixo cadastrado e as conectadas agora.", true,
-		func(inNada) (string, map[string]any) { return "", nil },
-		func(ctx context.Context, _ inNada) (*mcp.CallToolResult, error) {
+		func(in inMaquinas) (string, map[string]any) { return "", map[string]any{"cliente": in.Cliente} },
+		func(ctx context.Context, in inMaquinas) (*mcp.CallToolResult, error) {
 			var b strings.Builder
 			con := map[string]bool{}
 			for _, a := range sv.G.Conectadas() {
+				if in.Cliente != "" && !maquinas.MesmoCliente(a.Cliente, in.Cliente) {
+					continue
+				}
 				con[a.ID] = true
 				fmt.Fprintf(&b, "conectada: %s %s | %s | autorizado por %s\n", a.ID, a.Apelido, a.Cliente, a.Autorizado)
 			}
 			for _, m := range sv.G.Cadastro.Listar() {
+				if in.Cliente != "" && !maquinas.MesmoCliente(m.Cliente, in.Cliente) {
+					continue
+				}
 				fmt.Fprintf(&b, "cadastrada: %s | ID %s | %s | autorizado por %s em %s%s\n", m.Apelido, m.ID, m.Cliente, m.Autorizado, m.Em.Format("02/01/2006"), map[bool]string{true: " | " + m.Obs, false: ""}[m.Obs != ""])
 			}
 			if b.Len() == 0 {
@@ -222,17 +233,19 @@ func (sv *Servidor) Novo() *mcp.Server {
 			return texto(b.String()), nil
 		})
 
-	ferramenta(sv, s, "conectar", "Entra na máquina do cliente. Com ID e senha que o cliente mandou (a de uso único vale uma entrada), ou pelo apelido de uma máquina com acesso fixo. Exige o cliente e quem autorizou.", false,
+	ferramenta(sv, s, "conectar", "Entra na máquina do cliente. Com ID e senha que o cliente mandou (a de uso único vale uma entrada), ou pelo apelido de uma máquina com acesso fixo. Exige o cliente e quem autorizou. Se já há conexão aberta com ela, usa a que existe.", false,
 		func(in inConectar) (string, map[string]any) {
 			return in.Maquina, map[string]any{"cliente": in.Cliente, "autorizado_por": in.AutorizadoPor, "com_admin": in.UsuarioWindows != ""}
 		},
 		func(ctx context.Context, in inConectar) (*mcp.CallToolResult, error) {
-			a, err := sv.G.Conectar(ctx, sessao.Pedido{Maquina: in.Maquina, Senha: in.Senha, Cliente: in.Cliente, Autorizado: in.AutorizadoPor, UsuarioWindows: in.UsuarioWindows, SenhaWindow: in.SenhaWindows})
+			a, err := sv.G.Conectar(ctx, sessao.Pedido{Maquina: in.Maquina, Senha: in.Senha, Cliente: in.Cliente, Autorizado: in.AutorizadoPor, UsuarioWindows: in.UsuarioWindows, SenhaWindow: in.SenhaWindows, ExigirCliente: in.ExigirCliente, Reconectar: in.Reconectar})
 			if err != nil {
 				return nil, err
 			}
 			i := a.Info
-			return texto(fmt.Sprintf("conectado a %s (%s)\nmáquina %s, usuário %s, %s, RustDesk %s\npróximo passo: raio_x para mapear, executar para o terminal, tela para ver", a.ID, a.Cliente, i.GetHostname(), i.GetUsername(), i.GetPlatform(), i.GetVersion())), nil
+			r := texto(fmt.Sprintf("conectado a %s (%s)\nmáquina %s, usuário %s, %s, RustDesk %s\npróximo passo: raio_x para mapear, executar para o terminal, tela para ver", a.ID, a.Cliente, i.GetHostname(), i.GetUsername(), i.GetPlatform(), i.GetVersion()))
+			r.StructuredContent = map[string]any{"id": a.ID, "apelido": a.Apelido, "cliente": a.Cliente, "maquina": i.GetHostname(), "usuario": i.GetUsername(), "sistema": i.GetPlatform()}
+			return r, nil
 		})
 
 	ferramenta(sv, s, "desconectar", "Fecha tudo o que está aberto com a máquina.", false,
