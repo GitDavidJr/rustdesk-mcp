@@ -80,6 +80,7 @@ claude mcp add --transport http rustdesk https://mcp.exemplo.com/ \
 | `RDMCP_OUVIR` | modo `http`: endereço (padrão `127.0.0.1:8090`) |
 | `RDMCP_NOME` | nome que a pessoa vê na janela de conexão |
 | `RDMCP_REGRAS` | arquivo de texto com regras da sua casa, somadas às instruções do servidor |
+| `RDMCP_REGRAS_TEXTO` | o mesmo, com o texto direto na variável |
 | `RDMCP_OCIOSO` | desconecta depois desse tempo parado (padrão `30m`) |
 | `RDMCP_DADOS` | cadastro, auditoria e arquivos baixados |
 

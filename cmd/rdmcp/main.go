@@ -63,13 +63,13 @@ func rodar() error {
 	if os.Getenv("RDMCP_SERVIDOR") == "" || os.Getenv("RDMCP_CHAVE") == "" {
 		return errors.New("RDMCP_SERVIDOR (seu hbbs) e RDMCP_CHAVE (chave pública dele) são obrigatórios")
 	}
-	regras := ""
+	regras := os.Getenv("RDMCP_REGRAS_TEXTO")
 	if arq := os.Getenv("RDMCP_REGRAS"); arq != "" {
 		b, err := os.ReadFile(arq)
 		if err != nil {
 			return fmt.Errorf("RDMCP_REGRAS: %w", err)
 		}
-		regras = string(b)
+		regras = strings.TrimSpace(regras + "\n" + string(b))
 	}
 	reg, err := maquinas.Abrir(filepath.Join(dados, "maquinas.json"))
 	if err != nil {
