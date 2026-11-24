@@ -1,0 +1,18 @@
+# Exemplo. RDMCP_TOKEN: openssl rand -hex 32. Deixe atrás de TLS.
+services:
+  rdmcp:
+    build: .
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp:size=256m]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    ports: ["127.0.0.1:8090:8090"]
+    environment:
+      RDMCP_SERVIDOR: ${RDMCP_SERVIDOR:?}
+      RDMCP_CHAVE: ${RDMCP_CHAVE:?}
+      RDMCP_TOKEN: ${RDMCP_TOKEN:?}
+    volumes: ["rdmcp-dados:/dados"]
+volumes:
+  rdmcp-dados: {}

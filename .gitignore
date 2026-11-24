@@ -1,0 +1,4 @@
+bin/
+*.env
+dados/
+.DS_Store
