@@ -217,6 +217,7 @@ func (t *Tela) montar(img image.Image, monitor, larguraMax int, rec *Recorte, es
 		esc = float64(w) / float64(larguraMax)
 		w, h = larguraMax, int(float64(h)/esc)
 	}
+	img = opaca(img)
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	if esc == 1 {
 		draw.Draw(dst, dst.Bounds(), img, area.Min, draw.Src)
@@ -241,6 +242,16 @@ func (t *Tela) montar(img image.Image, monitor, larguraMax int, rec *Recorte, es
 		}
 	}
 	return &Captura{Dados: buf.Bytes(), Mime: mime, Largura: w, Altura: h, Escala: esc, Monitor: monitor}, nil
+}
+
+// opaca ignora a transparência do print: no Linux o RustDesk manda o canal alfa zerado e a tela sairia branca.
+func opaca(img image.Image) image.Image {
+	if n, ok := img.(*image.NRGBA); ok {
+		for i := 3; i < len(n.Pix); i += 4 {
+			n.Pix[i] = 0xff
+		}
+	}
+	return img
 }
 
 // ponto converte a coordenada da última imagem para a coordenada absoluta da área de trabalho.

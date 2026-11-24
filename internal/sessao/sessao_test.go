@@ -1,12 +1,14 @@
 package sessao
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"image"
 	"image/color"
+	"image/png"
 	"os/exec"
 	"strings"
 	"testing"
@@ -203,5 +205,21 @@ func TestConectarReusaEConfereOCliente(t *testing.T) {
 	viva.term.fim = errors.New("caiu")
 	if _, err := g.Conectar(ctx, Pedido{Maquina: "444555666", Cliente: "Loja Ação", ExigirCliente: true}); err == nil || !strings.Contains(err.Error(), "senha") {
 		t.Fatal("sem conexão viva e sem cadastro precisa pedir a senha:", err)
+	}
+}
+
+func TestPrintComAlfaZeradoNaoSaiBranco(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 4, 4))
+	img.SetNRGBA(1, 1, color.NRGBA{R: 10, G: 20, B: 30, A: 0})
+	c, err := telaTeste().montar(img, 0, 100, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := png.Decode(bytes.NewReader(c.Dados))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, g, b, a := out.At(1, 1).RGBA(); r>>8 != 10 || g>>8 != 20 || b>>8 != 30 || a>>8 != 255 {
+		t.Fatal(r>>8, g>>8, b>>8, a>>8)
 	}
 }
